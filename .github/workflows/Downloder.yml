@@ -1,4 +1,3 @@
----
 name: ⬇️  01- Download from url
 
 on:
@@ -152,29 +151,58 @@ jobs:
             echo "✓ Error file created"
           }
 
+          # ------------------------------------------------------------------
+          # اصلاح شده: دریافت حجم واقعی و بررسی کامل بودن دانلود
+          # ------------------------------------------------------------------
+          get_expected_size() {
+            local URL="$1"
+            # تلاش برای دریافت Content-Length با دنبال کردن redirectها
+            local SIZE=$(curl -sL -I -o /dev/null -w '%{size_download}' "$URL" 2>/dev/null)
+            if [[ "$SIZE" =~ ^[0-9]+$ ]] && [ "$SIZE" -gt 0 ]; then
+              echo "$SIZE"
+            else
+              # روش جایگزین: استفاده از هدر Content-Length
+              SIZE=$(curl -sI "$URL" | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r')
+              if [[ "$SIZE" =~ ^[0-9]+$ ]] && [ "$SIZE" -gt 0 ]; then
+                echo "$SIZE"
+              else
+                echo "0"
+              fi
+            fi
+          }
+
           download_with_retry() {
             local URL="$1"
             local FILENAME="$2"
-            local MAX_RETRIES=3
-            local RETRY_DELAY=2
+            local MAX_RETRIES=5              # افزایش تعداد تلاش
+            local RETRY_DELAY=5
             local SUCCESS=false
             local ERROR_LOG=""
 
-            rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+            # دریافت حجم واقعی فایل از سرور
+            local EXPECTED_SIZE=$(get_expected_size "$URL")
+            if [ "$EXPECTED_SIZE" -gt 0 ]; then
+              echo "📏 Expected file size: $(( EXPECTED_SIZE / 1024 / 1024 )) MB ($EXPECTED_SIZE bytes)"
+            else
+              echo "⚠️ Could not determine expected size, will only check non-zero"
+            fi
 
             for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
               echo "⏳ Attempt $attempt/$MAX_RETRIES: $FILENAME"
 
+              # حذف فایل ناقص قبلی اگر وجود داشته باشد (aria2 resume را خودش مدیریت می‌کند ولی برای اطمینان)
               rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
 
+              # تلاش با aria2c (پشتیبانی از resume، تایم‌اوت بالا، تلاش نامحدود)
               ERROR_LOG=$(aria2c \
-                --split=4 \
-                --max-connection-per-server=4 \
-                --min-split-size=10M \
-                --max-tries=2 \
-                --retry-wait=2 \
-                --timeout=45 \
-                --connect-timeout=20 \
+                --continue=true \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --timeout=0 \
+                --connect-timeout=30 \
+                --split=16 \
+                --max-connection-per-server=16 \
+                --min-split-size=1M \
                 --follow-torrent=false \
                 --check-certificate=false \
                 --allow-overwrite=true \
@@ -183,51 +211,97 @@ jobs:
                 --out="$FILENAME" \
                 "$URL" 2>&1)
 
-              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
-                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
-                if [ "$FILE_SIZE" -gt 0 ]; then
+              if [ -f "tmp_downloads/$FILENAME" ]; then
+                local ACTUAL_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                echo "📦 Downloaded size: $(( ACTUAL_SIZE / 1024 / 1024 )) MB ($ACTUAL_SIZE bytes)"
+                
+                # بررسی صحت حجم
+                local VERIFY_PASS=false
+                if [ "$EXPECTED_SIZE" -gt 0 ]; then
+                  if [ "$ACTUAL_SIZE" -eq "$EXPECTED_SIZE" ]; then
+                    VERIFY_PASS=true
+                  else
+                    echo "⚠️ Size mismatch! Expected $EXPECTED_SIZE, got $ACTUAL_SIZE"
+                  fi
+                else
+                  # اگر نتوانستیم حجم واقعی را بگیریم، حداقل مطمئن شویم فایل خالی نیست
+                  if [ "$ACTUAL_SIZE" -gt 0 ]; then
+                    VERIFY_PASS=true
+                  fi
+                fi
+
+                if [ "$VERIFY_PASS" = true ]; then
                   SUCCESS=true
-                  echo "✓ Downloaded: $FILENAME ($(( FILE_SIZE / 1024 / 1024 ))MB)"
+                  echo "✓ Successfully downloaded: $FILENAME ($(( ACTUAL_SIZE / 1024 / 1024 ))MB)"
                   break
+                else
+                  echo "❌ Incomplete or invalid download, retrying..."
+                  rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+                fi
+              else
+                echo "⚠ aria2c failed, trying curl with resume..."
+                
+                # تلاش با curl (با قابلیت resume)
+                ERROR_LOG=$(curl -L -f -# -C - \
+                  --retry 5 \
+                  --retry-delay 5 \
+                  --connect-timeout 30 \
+                  --max-time 7200 \
+                  -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                  -o "tmp_downloads/$FILENAME" \
+                  "$URL" 2>&1)
+
+                if [ -f "tmp_downloads/$FILENAME" ]; then
+                  local ACTUAL_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                  echo "📦 Downloaded size: $(( ACTUAL_SIZE / 1024 / 1024 )) MB"
+                  
+                  local VERIFY_PASS=false
+                  if [ "$EXPECTED_SIZE" -gt 0 ]; then
+                    if [ "$ACTUAL_SIZE" -eq "$EXPECTED_SIZE" ]; then
+                      VERIFY_PASS=true
+                    else
+                      echo "⚠️ Size mismatch! Expected $EXPECTED_SIZE, got $ACTUAL_SIZE"
+                    fi
+                  else
+                    if [ "$ACTUAL_SIZE" -gt 0 ]; then
+                      VERIFY_PASS=true
+                    fi
+                  fi
+
+                  if [ "$VERIFY_PASS" = true ]; then
+                    SUCCESS=true
+                    echo "✓ Successfully downloaded: $FILENAME"
+                    break
+                  else
+                    echo "❌ Incomplete or invalid download (curl), retrying..."
+                    rm -f "tmp_downloads/$FILENAME"
+                  fi
                 fi
               fi
 
-              rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
-              echo "⚠ aria2c failed, trying curl..."
-
-              ERROR_LOG=$(curl -L -f -# \
-                --retry 2 \
-                --retry-delay 2 \
-                --connect-timeout 20 \
-                --max-time 1800 \
-                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                -o "tmp_downloads/$FILENAME" \
-                "$URL" 2>&1)
-
-              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
-                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
-                if [ "$FILE_SIZE" -gt 0 ]; then
-                  SUCCESS=true
-                  echo "✓ Downloaded: $FILENAME ($(( FILE_SIZE / 1024 / 1024 ))MB)"
-                  break
-                fi
-              fi
-
-              rm -f "tmp_downloads/$FILENAME"
-              echo "⏱ Waiting before retry..."
+              echo "⏱ Waiting $RETRY_DELAY seconds before retry..."
               sleep $RETRY_DELAY
-              RETRY_DELAY=$((RETRY_DELAY + 1))
+              RETRY_DELAY=$((RETRY_DELAY + 5))
             done
 
-            if [ "$SUCCESS" = true ] && [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+            if [ "$SUCCESS" = true ] && [ -f "tmp_downloads/$FILENAME" ]; then
+              # یک بار دیگر حجم نهایی را بررسی کن
+              local FINAL_SIZE=$(stat -c%s "tmp_downloads/$FILENAME")
+              if [ "$EXPECTED_SIZE" -gt 0 ] && [ "$FINAL_SIZE" -ne "$EXPECTED_SIZE" ]; then
+                echo "❌ Final size check failed after all retries!"
+                rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+                create_error_file "$FILENAME" "Final size mismatch: expected $EXPECTED_SIZE, got $FINAL_SIZE after $MAX_RETRIES attempts" "$URL"
+                return 1
+              fi
               return 0
+            else
+              rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
+              create_error_file "$FILENAME" "Download failed after $MAX_RETRIES attempts (possibly incomplete)" "$URL"
+              return 1
             fi
-
-            rm -f "tmp_downloads/$FILENAME" "tmp_downloads/$FILENAME.aria2"
-            create_error_file "$FILENAME" "Download failed after $MAX_RETRIES attempts" "$URL"
-            return 1
           }
 
+          # حلقه اصلی دانلود برای هر URL
           for URL in $URLS; do
             FILENAME=$(basename "$URL" | sed 's/%20/ /g' | sed 's/%2F/-/g' | sed 's/[?#].*//')
             FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g')
@@ -235,6 +309,7 @@ jobs:
             download_with_retry "$URL" "$FILENAME" || echo "❌ Failed: $FILENAME"
           done
 
+          # ادامه کد قبلی برای zip کردن و آپلود (بدون تغییر)
           if [ "$MODE" = "zip" ]; then
             if [ -n "$(ls -A tmp_downloads 2>/dev/null)" ]; then
               ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S)"
@@ -323,6 +398,7 @@ jobs:
             fi
             rm -rf tmp_downloads
           else
+            # حالت normal (بدون zip کردن کل فایل‌ها، ولی هر فایل به تنهایی zip می‌شود و در صورت نیاز split می‌شود)
             for FILE in tmp_downloads/*; do
               [ -f "$FILE" ] || continue
 
@@ -530,7 +606,7 @@ jobs:
           {
             echo "# 📥 Downloaded Files"
             echo ""
-            "$FOLDERS" | while read -r FOLDER; do
+            echo "$FOLDERS" | while read -r FOLDER; do
               if [ -n "$FOLDER" ]; then
                 FOLDER_ENCODED=$(urlencode "${FOLDER}")
                 echo "- [${FOLDER}](./${FOLDER_ENCODED})"
