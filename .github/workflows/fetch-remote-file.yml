@@ -1,0 +1,55 @@
+# Mirrors a remote URL into this repository from GitHub Actions runners
+# (useful when direct downloads are blocked locally). After the run completes,
+# fetch the file via raw.githubusercontent.com or clone/pull the repo.
+name: Fetch remote file
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: Direct URL to download (runner must reach it)
+        required: true
+        type: string
+      dest_path:
+        description: Path inside the repo to save the file (e.g. mirrors/file.zip)
+        required: true
+        type: string
+        default: mirrors/downloaded-file
+
+jobs:
+  fetch-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download file
+        env:
+          FILE_URL: ${{ inputs.file_url }}
+          DEST_PATH: ${{ inputs.dest_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$DEST_PATH")"
+          curl -fL --connect-timeout 30 --max-time 3600 --retry 3 --retry-delay 10 \
+            -A "Mozilla/5.0 (compatible; StellarOracle-Downloader/1.0)" \
+            "$FILE_URL" -o "$DEST_PATH"
+          ls -lh "$DEST_PATH"
+
+      - name: Commit and push
+        env:
+          DEST_PATH: ${{ inputs.dest_path }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$DEST_PATH"
+          if git diff --staged --quiet; then
+            echo "No changes to commit (file identical or empty add)."
+            exit 0
+          fi
+          git commit -m "Mirror remote file: $DEST_PATH"
+          git push
