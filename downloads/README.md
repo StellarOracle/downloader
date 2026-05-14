@@ -1,8 +1,10 @@
-# 📥 Downloaded Files
+# 📥 Downloads
 
-- [15146831-1080p](./15146831-1080p)
-- [15339522-720p](./15339522-720p)
-- [15697269-720p](./15697269-720p)
+---
+
+## 📭 No files downloaded yet
+
+Use the download workflows to add files here.
 
 ---
 
