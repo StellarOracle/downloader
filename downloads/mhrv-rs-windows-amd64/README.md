@@ -7,7 +7,7 @@
 | Property | Value |
 |----------|-------|
 | **Original File** | `mhrv-rs-windows-amd64.zip` |
-| **Size** | 7.50 MB |
+| **Size** | 7.53 MB |
 | **Status** | **Complete (100%)** |
 | **Password Protected** | **NO** |
 
